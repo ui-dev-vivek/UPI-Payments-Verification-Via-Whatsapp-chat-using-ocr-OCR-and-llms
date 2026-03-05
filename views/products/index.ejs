@@ -1,0 +1,63 @@
+<div class="flex flex-col md:flex-row justify-between items-center mb-6">
+    <h2 class="text-3xl font-bold text-gray-800">Products</h2>
+    <a href="/admin/products/new"
+        class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:-translate-y-1">
+        <i class="fas fa-plus mr-2"></i>Add New Product
+    </a>
+</div>
+
+<% if (locals.success) { %>
+    <div class="bg-green-100 border-l-4 border-green-500 text-green-700 px-4 py-3 rounded mb-6">
+        <p><i class="fas fa-check-circle mr-2"></i>
+            <%= success %>
+        </p>
+    </div>
+    <% } %>
+
+        <div class="bg-white shadow-xl rounded-2xl overflow-hidden border border-gray-100">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-gray-50 border-b border-gray-100">
+                            <th class="py-4 px-6 font-bold text-gray-700 border-b border-gray-200">Code</th>
+                            <th class="py-4 px-6 font-bold text-gray-700 border-b border-gray-200">Product Title</th>
+                            <th class="py-4 px-6 font-bold text-gray-700 border-b border-gray-200 text-right">Price</th>
+                            <th class="py-4 px-6 font-bold text-gray-700 border-b border-gray-200 text-center">Actions
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-50">
+                        <% products.forEach(product=> { %>
+                            <tr class="hover:bg-gray-50 transition duration-150 ease-in-out">
+                                <td class="py-4 px-6 text-gray-600 font-mono">
+                                    <%= product.product_code %>
+                                </td>
+                                <td class="py-4 px-6">
+                                    <div class="font-bold text-gray-800">
+                                        <%= product.title %>
+                                    </div>
+                                    <div class="text-xs text-gray-500 truncate w-48">
+                                        <%= product.description %>
+                                    </div>
+                                </td>
+                                <td class="py-4 px-6 text-gray-800 font-bold text-right">₹<%= product.price %>
+                                </td>
+                                <td class="py-4 px-6 text-center space-x-2">
+                                    <a href="/admin/products/edit/<%= product.id %>"
+                                        class="text-blue-500 hover:text-blue-700 transition duration-150">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                    <form action="/admin/products/delete/<%= product.id %>" method="POST" class="inline"
+                                        onsubmit="return confirm('Siloge deleted this product?')">
+                                        <button type="submit"
+                                            class="text-red-500 hover:text-red-700 transition duration-150">
+                                            <i class="fas fa-trash-alt"></i>
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            <% }) %>
+                    </tbody>
+                </table>
+            </div>
+        </div>

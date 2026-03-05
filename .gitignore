@@ -1,0 +1,48 @@
+# ── Node.js ──────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# ── Environment ───────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Database ──────────────────────────────────
+database/*.db
+database/*.db.bak
+
+# ── WhatsApp Session ──────────────────────────
+.wwebjs_cache/
+.wwebjs_auth/
+
+# ── Generated Files ───────────────────────────
+qr_codes/
+tmp/
+temp/
+
+# ── Python ────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Tesseract Models (large binaries) ─────────
+ocr/*.traineddata
+
+# ── Logs ──────────────────────────────────────
+logs/
+*.log
+
+# ── OS ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
