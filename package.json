@@ -21,6 +21,7 @@
     "jimp": "^0.22.12",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.34.5",
     "sqlite3": "^5.1.6",
     "tesseract.js": "^7.0.0",
     "tinyurl": "^1.1.7",

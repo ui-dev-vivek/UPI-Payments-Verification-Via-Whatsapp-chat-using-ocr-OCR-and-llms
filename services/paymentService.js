@@ -69,62 +69,82 @@ async function strictPaymentValidation(aiResult, userPhone) {
         }
     }
 
-    // 3. Check time window (20 minutes)
-    if (aiResult.timeAgo && aiResult.timeAgo !== 'Not found') {
-        const isRecent = isPaymentRecent(aiResult.timeAgo);
+    // 3. Check time window (20 minutes) — uses AI-extracted paymentDateTime
+    const paymentDT = aiResult.paymentDateTime;
+    if (paymentDT && paymentDT !== 'Not found') {
+        const isRecent = isPaymentRecent(paymentDT);
+        console.log(`⏱️  Payment datetime: "${paymentDT}" → recent: ${isRecent}`);
         if (!isRecent) {
-            validation.errors.push('❌ Payment is too old. It must be within the last 20 minutes.');
+            validation.errors.push('❌ Payment is too old. Must be within the last 20 minutes.');
             return validation;
         }
+    } else {
+        console.log('⏱️  No payment datetime found in image — skipping time check');
     }
 
     // 4. Verification Logic
     const session = await get('SELECT id, product_price FROM user_session WHERE user_phone = ?', [userPhone]);
     const expectedAmount = session ? session.product_price : aiResult.productPrice;
     const sessionId = session ? session.id.toString() : '';
+    const rawText = aiResult.rawText || '';
 
-    let scenarioAMatch = false;
-    let scenarioBMatch = false;
-
-    // SCENARIO A: Name Match + Session ID in Note/Description
-    const nameMatches = aiResult.recipientName &&
-        aiResult.recipientName.toUpperCase().includes(config.RECIPIENT_NAME.split(' ')[0].toUpperCase());
-
-    // Check if AI extracted Note contains the unique session ID or if OCR Raw text contains it
-    const noteContainsSessionId = (aiResult.transactionNote && aiResult.transactionNote.includes(sessionId)) ||
-        (sessionId && aiResult.rawText && aiResult.rawText.includes(sessionId));
-
-    if (nameMatches && noteContainsSessionId) {
-        scenarioAMatch = true;
-    }
-
-    // SCENARIO B: UPI Match + Amount Match
-    const upiMatches = aiResult.recipientUPI && aiResult.recipientUPI.toLowerCase() === config.RECIPIENT_UPI.toLowerCase();
     const amountMatches = parseFloat(resolvedAmount) === parseFloat(expectedAmount);
 
-    if (upiMatches && amountMatches) {
-        scenarioBMatch = true;
-    }
+    // ── Name Match ────────────────────────────────────────────────────
+    // Check AI-extracted field first, then fall back to rawText scan.
+    // rawText is safe for name (specific multi-char string, not a short number).
+    const firstName = config.RECIPIENT_NAME.split(' ')[0].toUpperCase();
+    const aiNameMatch = aiResult.recipientName &&
+        aiResult.recipientName !== 'Not found' &&
+        aiResult.recipientName.toUpperCase().includes(firstName);
+    const rawNameMatch = rawText.toUpperCase().includes(firstName);
+    const nameMatches = aiNameMatch || rawNameMatch;
+
+    // ── UPI Match ─────────────────────────────────────────────────────
+    const expectedUPI = config.RECIPIENT_UPI.toLowerCase().replace(/\s/g, '');
+    const aiUpiMatch = aiResult.recipientUPI &&
+        aiResult.recipientUPI !== 'Not found' &&
+        aiResult.recipientUPI.toLowerCase().replace(/\s/g, '') === expectedUPI;
+    const rawUpiMatch = rawText.toLowerCase().includes(expectedUPI);
+    const upiMatches = aiUpiMatch || rawUpiMatch;
+
+    // ── Session ID Match ──────────────────────────────────────────────
+    // Use regex "(ID: X)" or "ID: X" so single-digit IDs like "4" don't
+    // match trivially in long text — only when wrapped in the ID format.
+    const idRegex = new RegExp(`\\(\\s*ID[:\\s]+${sessionId}\\s*\\)|\\bID[:\\s]+${sessionId}\\b`, 'i');
+    const aiNoteMatch = aiResult.transactionNote &&
+        aiResult.transactionNote !== 'Not found' &&
+        aiResult.transactionNote.includes(sessionId);
+    const rawNoteMatch = sessionId && idRegex.test(rawText);
+    const noteContainsSessionId = aiNoteMatch || rawNoteMatch;
+
+    // ── 4 Rules ───────────────────────────────────────────────────────
+    const rule1 = nameMatches && noteContainsSessionId && amountMatches;
+    const rule2 = upiMatches && amountMatches;
+    const rule3 = noteContainsSessionId && amountMatches;
+    const rule4 = nameMatches && amountMatches;
+
+    console.log(`\n🔍 PAYMENT VALIDATION:`);
+    console.log(`   Expected ₹${expectedAmount}  |  Resolved ₹${resolvedAmount}  |  match: ${amountMatches}`);
+    console.log(`   Name match  : AI="${aiResult.recipientName}"  raw="${rawNameMatch}"  → ${nameMatches}`);
+    console.log(`   UPI  match  : AI="${aiResult.recipientUPI}"   raw="${rawUpiMatch}"   → ${upiMatches}`);
+    console.log(`   ID   match  : AI="${aiResult.transactionNote}" raw="${rawNoteMatch}" → ${noteContainsSessionId}`);
+    console.log(`   Rule1(Name+ID+Amt):${rule1}  Rule2(UPI+Amt):${rule2}  Rule3(ID+Amt):${rule3}  Rule4(Name+Amt):${rule4}\n`);
 
     // FINAL VERDICT
-    if (scenarioAMatch || scenarioBMatch) {
-        // Double check amount
-        if (parseFloat(resolvedAmount) === parseFloat(expectedAmount)) {
-            validation.isValid = true;
-            await run(
-                'INSERT INTO payment_verification_logs (user_phone, transaction_id, amount) VALUES (?, ?, ?)',
-                [userPhone, transactionId, resolvedAmount]
-            );
-        } else {
-            validation.errors.push(`❌ Amount mismatch. Expected ₹${expectedAmount}, found ₹${resolvedAmount}`);
-        }
+    if (rule1 || rule2 || rule3 || rule4) {
+        validation.isValid = true;
+        await run(
+            'INSERT INTO payment_verification_logs (user_phone, transaction_id, amount) VALUES (?, ?, ?)',
+            [userPhone, transactionId, resolvedAmount]
+        );
     } else {
-        if (!nameMatches && !upiMatches) {
-            validation.errors.push(`❌ Payment recipient does not match ${config.RECIPIENT_NAME} or ${config.RECIPIENT_UPI}`);
-        } else if (nameMatches && !noteContainsSessionId) {
-            validation.errors.push(`❌ Unique Payment ID (${sessionId}) not found in payment description/note`);
-        } else if (upiMatches && !amountMatches) {
-            validation.errors.push(`❌ Amount mismatch. Expected ₹${expectedAmount}, found ₹${resolvedAmount}`);
+        if (!amountMatches) {
+            validation.errors.push(`Amount mismatch. Expected ₹${expectedAmount} but found ₹${resolvedAmount}.`);
+        } else if (!nameMatches && !upiMatches) {
+            validation.errors.push(`We couldn't match the recipient details. Please make sure you paid to the correct account.`);
+        } else {
+            validation.errors.push(`Payment verification incomplete. Please ensure the payment was made to the correct account.`);
         }
     }
 
@@ -133,70 +153,101 @@ async function strictPaymentValidation(aiResult, userPhone) {
 }
 
 /**
- * Check if payment time is within acceptable window (20 minutes)
+ * Check if a payment datetime string (extracted by AI) is within the last 20 minutes.
+ * Handles:
+ *   - "06/03/2026 11:30 PM"  (full date + 12h)
+ *   - "2026-03-06 23:30"     (full date + 24h)
+ *   - "Mar 6 2026 11:30"     (verbose + 24h)
+ *   - "11:30 PM" / "23:30"   (time only → assume today)
+ *   - "just now", "2 mins ago", "3 minutes ago"
+ *   - "6 Mar, 11:30 PM"
  */
-function isPaymentRecent(timeAgoText) {
-    const text = timeAgoText.toLowerCase();
+function isPaymentRecent(rawDateTime) {
+    if (!rawDateTime) return false;
+    const text = rawDateTime.trim();
 
-    // Parse time ago text
-    const minutes = text.match(/(\d+)\s*min/);
-    const hours = text.match(/(\d+)\s*hour/);
-    const days = text.match(/(\d+)\s*day/);
+    // ── Relative strings ─────────────────────────────────────────
+    const lower = text.toLowerCase();
+    if (/just\s*now|sekand|second/.test(lower)) return true;
+    const relMin = lower.match(/(\d+)\s*min/);
+    if (relMin) return parseInt(relMin[1]) <= 20;
+    if (/\d+\s*hour|\d+\s*hr|\d+\s*day/.test(lower)) return false;
 
-    if (minutes) {
-        return parseInt(minutes[1]) <= 20;
-    }
-    if (hours) {
-        return false; // More than 1 hour ago
-    }
-    if (days) {
-        return false; // More than 1 day ago
-    }
-
-    // If it says "just now" or "1 minute ago"
-    if (text.includes('just now') || text.includes('second')) {
-        return true;
-    }
-
-    // NEW: Handle full date formats (e.g., 04/03/2026 or 4 Mar 2026)
-    // If the screenshot has a full date that matches today's date, 
-    // it's likely recent; AI would still extract time.
     const now = new Date();
-    const todayStr = now.toLocaleDateString();
-    if (text.includes(todayStr) || text.includes(now.getFullYear().toString())) {
-        // If it includes today's date, it's safer, but we still need the time check
-    }
 
-    // NEW: Handle time formats like "11:06 PM" or "23:06"
-    const timeMatch = text.match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
-    if (timeMatch) {
-        const hours = parseInt(timeMatch[1]);
-        const minutes = parseInt(timeMatch[2]);
-        const ampm = timeMatch[3];
-
-        const paymentDate = new Date(now);
-
-        let adjustedHours = hours;
+    // ── Helper: build a Date from hours, minutes, optional am/pm, optional date ─
+    const buildDate = (h, m, ampm, dateMs) => {
+        let hour = parseInt(h);
+        const min = parseInt(m);
         if (ampm) {
-            const isPM = ampm.toLowerCase() === 'pm';
-            if (isPM && hours < 12) adjustedHours += 12;
-            if (!isPM && hours === 12) adjustedHours = 0;
+            const isPM = /pm/i.test(ampm);
+            if (isPM && hour < 12) hour += 12;
+            if (!isPM && hour === 12) hour = 0;
         }
+        const base = dateMs ? new Date(dateMs) : new Date(now);
+        base.setHours(hour, min, 0, 0);
+        return base;
+    };
 
-        paymentDate.setHours(adjustedHours);
-        paymentDate.setMinutes(minutes);
-        paymentDate.setSeconds(0);
+    const withinWindow = (d) => {
+        if (!d || isNaN(d)) return false;
+        const diffMin = (now - d) / 60000;
+        // Allow -2 to +20 min (slight clock skew tolerance)
+        return diffMin >= -2 && diffMin <= 20;
+    };
 
-        // If paymentDate seems to be in the future (e.g., 11:59pm message at 12:05am)
-        // Adjust for day boundary if needed, but 20 min window is usually tight.
-        const diffMs = now - paymentDate;
-        const diffMin = diffMs / (1000 * 60);
-
-        // Allow 20 mins window, and 5 mins "buffer" for slight clock drift
-        return diffMin >= -5 && diffMin <= 20;
+    // ── Try: DD/MM/YYYY HH:MM [AM|PM] ─  or  YYYY-MM-DD HH:MM ───
+    const fullDT = text.match(
+        /(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i
+    );
+    if (fullDT) {
+        const [, d, mo, yr, h, m, ap] = fullDT;
+        const ms = new Date(`${yr}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}`).getTime();
+        if (!isNaN(ms)) return withinWindow(buildDate(h, m, ap, ms));
     }
 
-    return false;
+    // YYYY-MM-DD HH:MM
+    const isoFull = text.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+    if (isoFull) {
+        const [, yr, mo, d, h, m, ap] = isoFull;
+        const ms = new Date(`${yr}-${mo}-${d}`).getTime();
+        if (!isNaN(ms)) return withinWindow(buildDate(h, m, ap, ms));
+    }
+
+    // ── "Mar 6 2026 11:30 PM" or "6 Mar 2026 11:30" ───────────────
+    const verboseDT = text.match(
+        /(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i
+    ) || text.match(
+        /([A-Za-z]{3,9})\s+(\d{1,2})\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i
+    );
+    if (verboseDT) {
+        const parsed = new Date(text);
+        if (!isNaN(parsed)) return withinWindow(parsed);
+    }
+
+    // ── "6 Mar, 11:30 PM" — day+month+time (assume current year) ─
+    const dmTime = text.match(
+        /(\d{1,2})\s+([A-Za-z]{3,9})[,\s]+(\d{1,2}):(\d{2})\s*(am|pm)?/i
+    );
+    if (dmTime) {
+        const [, d, mon, h, m, ap] = dmTime;
+        const ms = new Date(`${d} ${mon} ${now.getFullYear()}`).getTime();
+        if (!isNaN(ms)) return withinWindow(buildDate(h, m, ap, ms));
+    }
+
+    // ── Time-only: "11:30 PM" / "23:30" — assume today ───────────
+    const timeOnly = text.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+    if (timeOnly) {
+        const [, h, m, ap] = timeOnly;
+        const d = buildDate(h, m, ap, null);
+        // If result is in the future by more than 2 min, assume it was yesterday
+        if (d > now && (d - now) / 60000 > 2) d.setDate(d.getDate() - 1);
+        return withinWindow(d);
+    }
+
+    // Could not parse — don't block, log and pass
+    console.warn('⚠️  Could not parse payment datetime:', rawDateTime);
+    return true;
 }
 
 /**

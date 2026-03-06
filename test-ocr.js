@@ -15,11 +15,13 @@ async function testOCR() {
         return;
     }
 
-    console.log(`\n🧪 Testing OCR on: ${imagePath}\n${'─'.repeat(50)}`);
+    console.log(`\n🧪 Testing OCR on: ${imagePath} for ₹${process.argv[3] || '500'} (ID: ${process.argv[4] || '101'})\n${'─'.repeat(50)}`);
+const expectedAmount = process.argv[3] || '500';
+const expectedID = process.argv[4] || '101';
 
     try {
         const imageBuffer = fs.readFileSync(imagePath);
-        const result = await processPaymentImage(imageBuffer);
+        const result = await processPaymentImage(imageBuffer, expectedAmount, expectedID);
 
         console.log('\n' + '─'.repeat(50));
         console.log('✅ RESULT:\n');

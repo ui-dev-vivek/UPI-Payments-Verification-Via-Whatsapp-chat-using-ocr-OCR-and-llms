@@ -444,40 +444,53 @@ async function handlePaymentScreenshot(userPhone, media, client) {
             return;
         }
 
-        await safeSendMessage(client, userPhone, '⏳ Verifying payment (OCR + AI)...');
+        await safeSendMessage(client, userPhone, '⏳ Checking your payment, please wait a moment...');
 
         // Convert media to buffer
         const buffer = Buffer.from(media.data, 'base64');
 
-        // Process image with OCR
-        const ocrResult = await processPaymentImage(buffer);
+        // Use session ID as unique identifier for verification (consistent with QR generation)
+        const sessionId = session.id || Date.now().toString().slice(-6);
+
+        // Process image with OCR (now with expected amount, sessionId and multi-stage verification)
+        const ocrResult = await processPaymentImage(buffer, session.product_price, sessionId);
         console.log('OCR Result:', ocrResult);
 
-        // EXTRA: Intent Classification - Is this even a payment?
-        // Relaxing checks: transactionId is optional now
-        const isNotPayment = !ocrResult.amount && !ocrResult.isSuccess && !ocrResult.isFailed;
-        if (isNotPayment && !ocrResult.rawText.toLowerCase().includes('phonepe') && !ocrResult.rawText.toLowerCase().includes('paytm') && !ocrResult.rawText.toLowerCase().includes('google pay') && !ocrResult.rawText.toLowerCase().includes('upi')) {
-            await safeSendMessage(client, userPhone,
-                '🤔 This doesn\'t look like a payment screenshot.\n\n' +
-                'Please send a clear screenshot of your successful transaction!');
-            return;
-        }
+        // Sanity check: is this even a payment screenshot?
+        const rawLower = (ocrResult.rawText || '').toLowerCase();
+        const looksLikePayment = rawLower.includes('paid') || rawLower.includes('success') ||
+            rawLower.includes('payment') || rawLower.includes('upi') ||
+            rawLower.includes('phonepe') || rawLower.includes('paytm') ||
+            rawLower.includes('google pay') || rawLower.includes('gpay') ||
+            rawLower.includes('rs.') || rawLower.includes('ref no') ||
+            ocrResult.numericAmount != null;
 
-        if (ocrResult.isFailed) {
+        if (!looksLikePayment) {
             await safeSendMessage(client, userPhone,
-                '❌ This payment appears to be *FAILED* or *DECLINED*.\n\n' +
-                'Please ensure your transaction was successful before sending the screenshot.');
+                '🤔 Hmm, that doesn\'t look like a payment screenshot.\n\n' +
+                'Please send a clear screenshot of your successful UPI payment!');
             return;
         }
 
         // Update session with OCR data
-        // Using ocrResult.numericAmount for numeric logic but passing the full raw text to AI
         await updateSessionWithOCR(userPhone, ocrResult.rawText, ocrResult.numericAmount);
         await updateSessionWithScreenshot(userPhone, ocrResult.imagePath || 'screenshot');
 
-        // Verify with AI (AI will now see symbols in rawText)
-        const aiVerification = await verifyPaymentScreenshot(ocrResult.rawText);
-        console.log('AI Verification:', aiVerification);
+        // Verify with AI (now already done in ocrResult)
+        const aiVerification = {
+            verified: ocrResult.verified,
+            amount: ocrResult.numericAmount ? String(ocrResult.numericAmount) : 'Not found',
+            transactionId: ocrResult.transactionId,
+            reason: ocrResult.reasoning,
+            confidence: ocrResult.confidence,
+            rawText: ocrResult.rawText,
+            recipientName: ocrResult.extractedName,
+            recipientUPI: ocrResult.extractedUPI,
+            transactionNote: ocrResult.extractedNote,
+            paymentDateTime: ocrResult.paymentDateTime,    // ← used by 20-min window
+            matchedRule: ocrResult.matchedRule,            // ← for logging
+        };
+        console.log('AI Verification (from OCR Service):', aiVerification);
 
         // **STRICT VALIDATION with 3 data points:**
         // 1. Product price (from session)
@@ -535,18 +548,26 @@ async function handlePaymentScreenshot(userPhone, media, client) {
                 `User: ${userPhone}\n` +
                 `Product: ${product.title}\n` +
                 `Amount: ₹${strictValidation.amount}\n` +
+                `Rule Matched: Rule ${aiVerification.matchedRule}\n` +
                 `Transaction: ${strictValidation.transactionId}\n` +
-                `OCR Amount: ₹${ocrResult.extractedAmount}`;
+                `Recipient: ${aiVerification.recipientName} (${aiVerification.recipientUPI})\n` +
+                `Note: ${aiVerification.transactionNote}\n` +
+                `Payment Time: ${aiVerification.paymentDateTime}`;
 
             await safeSendMessage(client, config.ADMIN_NUMBER, adminMsg);
 
         } else {
-            // Payment verification failed
-            const failureMsg =
-                '❌ *PAYMENT NOT VERIFIED*\n\n' +
-                `Issues:\n${strictValidation.errors.join('\n')}\n\n` +
-                'Please try again or start a new session.\n' +
-                `*product=P101*`;
+            // Payment could not be confirmed
+            const isAIFailure = ocrResult.method?.includes('AI Unavailable');
+            const failureMsg = isAIFailure
+                ? '⏳ We\'re a little busy right now. Please resend your payment screenshot in a moment and we\'ll check it again!'
+                : '❌ We weren\'t able to confirm your payment.\n\n' +
+                  `${strictValidation.errors.join('\n')}\n\n` +
+                  'Please make sure:\n' +
+                  `• The amount *₹${session.product_price}* is clearly visible\n` +
+                  `• Payment was sent to *${config.RECIPIENT_NAME}*\n` +
+                  `• The screenshot is from your UPI app (PhonePe, GPay, Paytm, etc.)\n\n` +
+                  'Send the screenshot again or type *cancel* to restart.';
 
             await safeSendMessage(client, userPhone, failureMsg);
 
@@ -554,10 +575,15 @@ async function handlePaymentScreenshot(userPhone, media, client) {
             const adminFailureMsg =
                 '❌ *PAYMENT VERIFICATION FAILED*\n\n' +
                 `User: ${userPhone}\n` +
-                `Product: ${session.product.title}\n` +
+                `Product: ${session.product?.title || 'N/A'}\n` +
                 `Errors:\n${strictValidation.errors.join('\n')}\n\n` +
-                `OCR Amount: ₹${ocrResult.extractedAmount}\n` +
-                `AI Result: ${JSON.stringify(aiVerification, null, 2)}`;
+                `Detected Amount: ₹${ocrResult.numericAmount ?? 'N/A'}\n` +
+                `Extracted Name : ${aiVerification.recipientName}\n` +
+                `Extracted UPI  : ${aiVerification.recipientUPI}\n` +
+                `Note/Remark    : ${aiVerification.transactionNote}\n` +
+                `Payment Time   : ${aiVerification.paymentDateTime}\n` +
+                `AI Rule Matched: ${aiVerification.matchedRule ?? 'None'}\n` +
+                `AI Confidence  : ${aiVerification.confidence}%`;
 
             await safeSendMessage(client, config.ADMIN_NUMBER, adminFailureMsg);
         }

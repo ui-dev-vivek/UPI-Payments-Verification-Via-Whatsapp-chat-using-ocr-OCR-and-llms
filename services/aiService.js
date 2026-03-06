@@ -1,7 +1,8 @@
 const Groq = require('groq-sdk');
+const config = require('../config/env');
 
 const groq = new Groq({
-    apiKey: process.env.GROQ_KEY
+    apiKey: config.GROQ_KEY
 });
 
 /**
@@ -56,7 +57,7 @@ Return STRICTLY as valid JSON (no markdown, no extra text):
                     content: prompt
                 }
             ],
-            model: process.env.GROQ_MODEL || "llama3-70b-8192", // Default to llama3 if not specified
+            model: config.GROQ_MODEL,
             temperature: 0.1, // Low temperature for factual extraction
         });
 
@@ -112,7 +113,7 @@ Respond STRICTLY as valid JSON:
                     content: prompt
                 }
             ],
-            model: process.env.GROQ_MODEL || "llama3-70b-8192",
+            model: config.GROQ_MODEL,
             temperature: 0.3,
         });
 
@@ -165,7 +166,7 @@ Make it feel like talking to a real person, not a bot.`;
                     content: prompt
                 }
             ],
-            model: process.env.GROQ_MODEL || "llama3-70b-8192",
+            model: config.GROQ_MODEL,
             temperature: 0.7,
         });
 
@@ -177,8 +178,113 @@ Make it feel like talking to a real person, not a bot.`;
     }
 }
 
+/**
+ * AUTHORITATIVE JUDGMENT: Determine if the payment is valid based on specific STRICT rules.
+ * Also extracts paymentDateTime for 20-min window validation.
+ * @param {Array} evidenceList
+ * @param {string} expectedNorm
+ * @param {string} expectedSessionId
+ * @returns {Promise<{verified: boolean, matchedRule: number|null, detected: string, confidence: number, reasoning: string, extractedName: string, extractedUPI: string, extractedNote: string, paymentDateTime: string}>}
+ */
+async function analyzeOcrEvidence(evidenceList, expectedNorm, expectedSessionId) {
+    const GROQ_MODEL = config.GROQ_MODEL;
+
+    // Use best-confidence passes, compact text for prompt
+    const evidence = evidenceList
+        .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+        .slice(0, 8)
+        .map(r => ({
+            stage: r.stage,
+            psm: r.psm,
+            conf: r.confidence,
+            nums: r.numbers,
+            text: (r.fullText || '').replace(/\s+/g, ' ').substring(0, 200),
+        }));
+
+    const prompt = `
+You are a strict payment verification AI for Indian UPI payments.
+
+EXPECTED AMOUNT : ₹${expectedNorm}
+RECIPIENT NAME  : ${config.RECIPIENT_NAME}
+RECIPIENT UPI   : ${config.RECIPIENT_UPI}
+PAYMENT ID      : ${expectedSessionId}
+
+OCR EVIDENCE:
+${JSON.stringify(evidence, null, 2)}
+
+STEP 1 — EXTRACT these fields from the OCR text:
+  amount        — numeric only (e.g. "1500"). Fix ₹→3 misread. Remove commas.
+  recipientName — person who RECEIVED money (not sender).
+  recipientUPI  — UPI handle (e.g. 9876543210@ybl). NOT a bare phone number.
+  paymentNote   — text in Note / Remarks / Message / Description / Reference field.
+  paymentDateTime — EXACT date+time shown on screenshot.
+    • Prefer formats with BOTH date AND time: "06/03/2026 11:30 PM", "Mar 6 2026 11:30"
+    • If only time visible: "11:30 PM"
+    • If nothing found: "Not found"
+
+STEP 2 — STRICT RULES. verified = true ONLY when a COMPLETE rule matches:
+  Rule 1: recipientName CONTAINS "${config.RECIPIENT_NAME.split(' ')[0]}"
+          AND paymentNote CONTAINS "${expectedSessionId}"
+          AND amount == "${expectedNorm}"
+
+  Rule 2: recipientUPI == "${config.RECIPIENT_UPI}"
+          AND amount == "${expectedNorm}"
+
+  Rule 3: paymentNote CONTAINS "${expectedSessionId}"
+          AND amount == "${expectedNorm}"
+
+  Rule 4: recipientName CONTAINS "${config.RECIPIENT_NAME.split(' ')[0]}"
+          AND amount == "${expectedNorm}"
+
+  ⚠ Partial matches do NOT pass. Amount-only match → verified = false.
+  OCR tolerance: 0↔O, 1↔l↔I, 5↔S, 8↔B, 9↔g, comma↔dot for amounts only.
+
+Reply ONLY with valid JSON (no markdown):
+{
+  "verified": true or false,
+  "matchedRule": 1 or 2 or 3 or 4 or null,
+  "amount": "string or Not found",
+  "recipientName": "string or Not found",
+  "recipientUPI": "string or Not found",
+  "paymentNote": "string or Not found",
+  "paymentDateTime": "exact datetime from screenshot or Not found",
+  "confidence": 0 to 100,
+  "reasoning": "which rule matched or why none matched"
+}
+`.trim();
+
+    try {
+        const chat = await groq.chat.completions.create({
+            model: GROQ_MODEL,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.0,
+            max_tokens: 450,
+        });
+
+        const raw = chat.choices[0]?.message?.content?.trim() ?? '';
+        const jsonStr = raw.replace(/```json|```/g, '').trim();
+        const parsed = JSON.parse(jsonStr);
+
+        return {
+            verified: Boolean(parsed.verified),
+            matchedRule: parsed.matchedRule ?? null,
+            detected: parsed.amount ?? 'N/A',
+            confidence: Number(parsed.confidence ?? 0),
+            reasoning: parsed.reasoning ?? '',
+            extractedName: parsed.recipientName ?? 'Not found',
+            extractedUPI: parsed.recipientUPI ?? 'Not found',
+            extractedNote: parsed.paymentNote ?? 'Not found',
+            paymentDateTime: parsed.paymentDateTime ?? 'Not found',
+        };
+    } catch (err) {
+        console.error('❌ Groq analysis failed:', err.message);
+        return null;
+    }
+}
+
 module.exports = {
     verifyWithAI,
     understandUserIntent,
-    generateConversationResponse
+    generateConversationResponse,
+    analyzeOcrEvidence
 };

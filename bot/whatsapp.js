@@ -28,7 +28,7 @@ lockFiles.forEach(lockFile => {
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        executablePath: config.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
+        // executablePath: config.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
         headless: 'new',
         args: [
             '--no-sandbox',
@@ -136,17 +136,17 @@ async function initializeClientWithRetry(maxRetries = 5) {
             return;
         } catch (error) {
             console.error(`❌ Attempt ${attempt} failed: ${error.message}`);
-            
+
             // Cleanup on error
             try {
                 await client.destroy();
             } catch (e) {
                 // Ignore cleanup errors
             }
-            
+
             if (attempt === maxRetries) {
                 console.error('\n❌ Failed to initialize client after all retries');
-                
+
                 // Provide diagnostic guidance
                 if (error.message.includes('Navigating frame was detached')) {
                     console.error('\n⚠️  Frame detachment during navigation');
@@ -162,7 +162,7 @@ async function initializeClientWithRetry(maxRetries = 5) {
                 }
                 process.exit(1);
             }
-            
+
             // Wait before retrying with exponential backoff
             const waitTime = Math.pow(2, attempt - 1) * 2000;
             console.log(`Waiting ${waitTime}ms before retry...\n`);
